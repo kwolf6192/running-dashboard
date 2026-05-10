@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>러닝 아카이브 대시보드</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f9f9f7; color: #1a1a1a; padding: 24px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 500; margin-bottom: 20px; color: #1a1a1a; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 24px; }
+  .stat-card { background: #f0efea; border-radius: 8px; padding: 14px; }
+  .stat-label { font-size: 12px; color: #888; margin-bottom: 4px; }
+  .stat-value { font-size: 20px; font-weight: 500; }
+  .btn-group { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  button { background: transparent; border: 0.5px solid rgba(0,0,0,0.2); border-radius: 8px; padding: 6px 16px; font-size: 13px; cursor: pointer; color: #1a1a1a; }
+  button:hover { background: #f0efea; }
+  button.active { background: #f0efea; }
+  .chart-wrap { position: relative; width: 100%; height: 220px; margin-bottom: 28px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 8px; }
+  .section-label { font-size: 13px; font-weight: 500; color: #888; margin-bottom: 10px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; font-size: 12px; color: #555; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 3px; vertical-align: middle; }
+  .donut-wrap { position: relative; width: 100%; height: 180px; }
+  .shoe-item { margin-bottom: 12px; }
+  .shoe-header { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
+  .shoe-name { font-weight: 500; }
+  .shoe-km { color: #888; }
+  .progress-bg { background: #e8e8e4; border-radius: 4px; height: 6px; }
+  .progress-fill { height: 100%; background: #1D9E75; border-radius: 4px; }
+  .status { font-size: 12px; color: #aaa; text-align: center; margin-top: 20px; }
+  @media (max-width: 480px) { .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>러닝 아카이브</h1>
+
+<div class="stat-grid" id="stat-cards"></div>
+
+<div class="btn-group">
+  <button id="btn-week" class="active" onclick="setView('week')">주간</button>
+  <button id="btn-month" onclick="setView('month')">월간</button>
+  <button id="btn-year" onclick="setView('year')">연간</button>
+</div>
+
+<div class="chart-wrap">
+  <canvas id="mileageChart" role="img" aria-label="기간별 마일리지 막대 차트">마일리지 데이터</canvas>
+</div>
+
+<div class="two-col">
+  <div>
+    <div class="section-label">80/20 강도 비율</div>
+    <div class="legend" id="ratio-legend"></div>
+    <div class="donut-wrap">
+      <canvas id="ratioChart" role="img" aria-label="훈련 강도 비율 도넛 차트">강도 비율</canvas>
+    </div>
+  </div>
+  <div>
+    <div class="section-label">러닝화 마일리지</div>
+    <div id="shoe-list"></div>
+  </div>
+</div>
+
+<div class="status" id="status"></div>
+
+<script>
+const NOTION_API = 'https://api.anthropic.com/v1/messages';
+const RUNS_DS = 'afa508e2-5fe8-42e4-bf5e-963c6c20e3ff';
+const SHOES_DS = 'b488b844-2272-4ce2-824a-f95235a0ad88';
+const COLORS = { Easy:'#1D9E75','Long Run':'#378ADD',Tempo:'#EF9F27',Interval:'#E24B4A',Trail:'#BA7517',Recovery:'#888780',Race:'#7F77DD' };
+const LOW = ['Easy','Long Run','Recovery'];
+
+let allRuns = [], shoeData = [], currentView = 'week';
+let mileageChart = null, ratioChart = null;
+
+async function fetchData() {
+  document.getElementById('status').textContent = '노션에서 데이터 불러오는 중...';
+  try {
+    const res = await fetch(NOTION_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: 'Return ONLY a JSON object with two keys: "runs" (array of {date,distance,type}) and "shoes" (array of {name,total,goal}). No markdown, no explanation.',
+        messages: [{ role: 'user', content: `From Notion data source "${RUNS_DS}" get all running logs with 날짜(date YYYY-MM-DD), 거리(distance km number), 훈련유형(type string). From "${SHOES_DS}" get all shoes with 신발명(name), 누적거리(total km), 목표수명(goal km). Return JSON only.` }],
+        mcp_servers: [{ type: 'url', url: 'https://mcp.notion.com/mcp', name: 'notion-mcp' }]
+      })
+    });
+    const data = await res.json();
+    const text = data.content?.find(b => b.type === 'text')?.text || '';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    allRuns = parsed.runs || [];
+    shoeData = parsed.shoes || [];
+    document.getElementById('status').textContent = `${allRuns.length}개 기록 · 마지막 업데이트 ${new Date().toLocaleString('ko-KR')}`;
+  } catch(e) {
+    loadDemo();
+    document.getElementById('status').textContent = '데모 데이터 표시 중 (실제 기록이 쌓이면 자동 반영)';
+  }
+  render();
+}
+
+function loadDemo() {
+  const today = new Date();
+  const types = ['Easy','Easy','Easy','Recovery','Long Run','Tempo','Interval'];
+  for (let i = 20; i >= 0; i--) {
+    const d = new Date(today); d.setDate(d.getDate() - i);
+    if (Math.random() > 0.35)
+      allRuns.push({ date: d.toISOString().slice(0,10), distance: +(4+Math.random()*14).toFixed(2), type: types[Math.floor(Math.random()*types.length)] });
+  }
+  shoeData = [{ name: '아식스 젤카야노 33', total: 4.91, goal: 800 }];
+}
+
+function groupBy(runs, view) {
+  const map = {};
+  runs.forEach(r => {
+    const d = new Date(r.date); let key;
+    if (view === 'week') { const day = d.getDay(); const mon = new Date(d); mon.setDate(d.getDate()-(day===0?6:day-1)); key = mon.toISOString().slice(0,10); }
+    else if (view === 'month') { key = r.date.slice(0,7); }
+    else { key = r.date.slice(0,4); }
+    map[key] = (map[key]||0) + r.distance;
+  });
+  return map;
+}
+
+function formatLabel(key, view) {
+  if (view === 'week') return key.slice(5)+' 주';
+  if (view === 'month') { const [y,m]=key.split('-'); return `${y.slice(2)}/${+m}월`; }
+  return key+'년';
+}
+
+function setView(v) {
+  currentView = v;
+  document.querySelectorAll('.btn-group button').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-'+v).classList.add('active');
+  renderMileage();
+}
+
+function renderStats() {
+  const total = allRuns.reduce((s,r)=>s+r.distance,0);
+  const wg = groupBy(allRuns,'week'), wk = Object.keys(wg).sort();
+  const mg = groupBy(allRuns,'month'), mk = Object.keys(mg).sort();
+  const thisWeek = wg[wk[wk.length-1]]||0;
+  const thisMonth = mg[mk[mk.length-1]]||0;
+  const lowKm = allRuns.filter(r=>LOW.includes(r.type)).reduce((s,r)=>s+r.distance,0);
+  const ratio = total>0?Math.round(lowKm/total*100):0;
+  document.getElementById('stat-cards').innerHTML = [
+    ['이번 주', thisWeek.toFixed(1)+' km'],
+    ['이번 달', thisMonth.toFixed(1)+' km'],
+    ['총 누적', total.toFixed(1)+' km'],
+    ['저강도 비율', ratio+'%']
+  ].map(([l,v])=>`<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`).join('');
+}
+
+function renderMileage() {
+  const grouped = groupBy(allRuns, currentView);
+  const keys = Object.keys(grouped).sort();
+  const labels = keys.map(k=>formatLabel(k,currentView));
+  const values = keys.map(k=>+grouped[k].toFixed(1));
+  if (mileageChart) mileageChart.destroy();
+  mileageChart = new Chart(document.getElementById('mileageChart'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: '거리 (km)', data: values, backgroundColor: '#1D9E75', borderRadius: 4 }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales: { x:{ticks:{autoSkip:false,maxRotation:45,font:{size:11}},grid:{display:false}}, y:{ticks:{callback:v=>v+'km',font:{size:11}},grid:{color:'rgba(0,0,0,0.05)'}} } }
+  });
+}
+
+function renderRatio() {
+  const tc = {};
+  allRuns.forEach(r=>{ tc[r.type]=(tc[r.type]||0)+r.distance; });
+  const types = Object.keys(tc), values = types.map(t=>+tc[t].toFixed(1));
+  const total = values.reduce((s,v)=>s+v,0);
+  const colors = types.map(t=>COLORS[t]||'#888780');
+  document.getElementById('ratio-legend').innerHTML = types.map((t,i)=>
+    `<span><span class="legend-dot" style="background:${colors[i]}"></span>${t} ${total>0?Math.round(values[i]/total*100):0}%</span>`).join('');
+  if (ratioChart) ratioChart.destroy();
+  ratioChart = new Chart(document.getElementById('ratioChart'), {
+    type: 'doughnut',
+    data: { labels:types, datasets:[{ data:values, backgroundColor:colors, borderWidth:0 }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, cutout:'65%' }
+  });
+}
+
+function renderShoes() {
+  const el = document.getElementById('shoe-list');
+  if (!shoeData.length) { el.innerHTML='<div style="font-size:13px;color:#aaa;">등록된 러닝화 없음</div>'; return; }
+  el.innerHTML = shoeData.map(s=>{
+    const pct = Math.min(Math.round((s.total||0)/(s.goal||800)*100),100);
+    return `<div class="shoe-item"><div class="shoe-header"><span class="shoe-name">${s.name}</span><span class="shoe-km">${(s.total||0).toFixed(0)} / ${s.goal||800}km</span></div><div class="progress-bg"><div class="progress-fill" style="width:${pct}%"></div></div></div>`;
+  }).join('');
+}
+
+function render() { renderStats(); renderMileage(); renderRatio(); renderShoes(); }
+
+fetchData();
+</script>
+</body>
+</html>
